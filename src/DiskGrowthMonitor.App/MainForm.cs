@@ -24,7 +24,7 @@ public sealed class MainForm : Form
     private readonly ListView _hourList = new();
     private readonly ListView _todayList = new();
     private readonly TextBox _detailBox = new();
-    private readonly TreeView _traceTree = new();
+    private readonly TextBox _traceBox = new();
     private readonly NumericUpDown _displayThresholdInput = new();
     private GrowthAggregate? _selectedAggregate;
     private bool _loadingThreshold;
@@ -262,15 +262,21 @@ public sealed class MainForm : Form
         _detailBox.BackColor = Color.FromArgb(248, 252, 251);
         _detailBox.ForeColor = Color.FromArgb(36, 54, 59);
         _detailBox.ScrollBars = ScrollBars.Vertical;
+        _detailBox.WordWrap = true;
         _detailBox.Text = "选择一条记录查看完整路径、具体文件和溯源树。";
         layout.Controls.Add(_detailBox, 0, 1);
 
-        _traceTree.Name = "TraceTree";
-        _traceTree.Dock = DockStyle.Fill;
-        _traceTree.BorderStyle = BorderStyle.None;
-        _traceTree.BackColor = Color.FromArgb(248, 252, 251);
-        _traceTree.ForeColor = Color.FromArgb(24, 39, 44);
-        layout.Controls.Add(_traceTree, 0, 2);
+        _traceBox.Name = "TraceTree";
+        _traceBox.Dock = DockStyle.Fill;
+        _traceBox.Multiline = true;
+        _traceBox.ReadOnly = true;
+        _traceBox.BorderStyle = BorderStyle.None;
+        _traceBox.BackColor = Color.FromArgb(248, 252, 251);
+        _traceBox.ForeColor = Color.FromArgb(24, 39, 44);
+        _traceBox.ScrollBars = ScrollBars.Vertical;
+        _traceBox.WordWrap = true;
+        _traceBox.Text = "溯源将在选择条目后显示。";
+        layout.Controls.Add(_traceBox, 0, 2);
 
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 2, BackColor = Color.Transparent, Padding = new Padding(0, 14, 0, 0) };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -481,10 +487,11 @@ public sealed class MainForm : Form
 
     private void UpdateDetailAndTrace()
     {
-        _traceTree.Nodes.Clear();
+        _traceBox.Clear();
         if (_selectedAggregate is null)
         {
             _detailBox.Text = "选择一条记录查看完整路径、具体文件和溯源树。";
+            _traceBox.Text = "溯源将在选择条目后显示。";
             return;
         }
 
@@ -517,17 +524,23 @@ public sealed class MainForm : Form
         foreach (var item in recent)
         {
             detail.AppendLine($"  {FormatSignedBytes(item.DeltaSize),10}  {Path.GetFileName(item.Path)}");
-            detail.AppendLine($"      {item.Path}");
+            detail.AppendLine(Indent(WrapPath(item.Path, 34), "      "));
         }
         detail.AppendLine();
         detail.AppendLine("说明：如果某个文件 A 是作为独立文件写入目录 B，可以看到 A 的文件名；如果 A 被写入压缩包、数据库、缓存容器等单个文件 B 内部，工具不读取正文，通常只能看到 B 变大。");
         _detailBox.Text = detail.ToString();
 
-        _traceTree.Nodes.Add(CreateTraceTreeNode(trace));
-        _traceTree.ExpandAll();
+        _traceBox.Text = BuildTraceText(trace);
     }
 
-    private TreeNode CreateTraceTreeNode(GrowthTraceNode trace)
+    private string BuildTraceText(GrowthTraceNode trace)
+    {
+        var builder = new StringBuilder();
+        AppendTraceNode(builder, trace, 0);
+        return builder.ToString();
+    }
+
+    private void AppendTraceNode(StringBuilder builder, GrowthTraceNode trace, int depth)
     {
         var name = Path.GetFileName(trace.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         if (string.IsNullOrWhiteSpace(name))
@@ -535,32 +548,74 @@ public sealed class MainForm : Form
             name = trace.Path;
         }
 
-        var node = new TreeNode($"{name}  {FormatSignedBytes(trace.DeltaSize)}  ({trace.EventCount} 条)")
-        {
-            ToolTipText = trace.Path,
-            ForeColor = trace.DeltaSize >= 0 ? Color.FromArgb(183, 84, 42) : Color.FromArgb(15, 126, 112)
-        };
+        var prefix = new string(' ', depth * 2);
+        builder.AppendLine($"{prefix}{name}  {FormatSignedBytes(trace.DeltaSize)}  ({trace.EventCount} 条)");
+        builder.AppendLine(Indent(WrapPath(trace.Path, 36), prefix + "  "));
 
         foreach (var child in trace.Children)
         {
-            node.Nodes.Add(CreateTraceTreeNode(child));
+            AppendTraceNode(builder, child, depth + 1);
         }
 
         foreach (var item in trace.RecentEvents.Take(5))
         {
-            node.Nodes.Add(new TreeNode($"{Path.GetFileName(item.Path)}  {FormatSignedBytes(item.DeltaSize)}")
-            {
-                ToolTipText = item.Path,
-                ForeColor = item.DeltaSize >= 0 ? Color.FromArgb(183, 84, 42) : Color.FromArgb(15, 126, 112)
-            });
+            builder.AppendLine($"{prefix}  {Path.GetFileName(item.Path)}  {FormatSignedBytes(item.DeltaSize)}");
+            builder.AppendLine(Indent(WrapPath(item.Path, 34), prefix + "    "));
         }
 
         if (!string.IsNullOrWhiteSpace(trace.StopReason))
         {
-            node.Nodes.Add(new TreeNode($"停止：{trace.StopReason}") { ForeColor = Color.FromArgb(96, 106, 110) });
+            builder.AppendLine($"{prefix}  停止：{trace.StopReason}");
+        }
+    }
+
+    private static string WrapPath(string path, int preferredLineLength)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Length <= preferredLineLength)
+        {
+            return path;
         }
 
-        return node;
+        var parts = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var builder = new StringBuilder();
+        var line = new StringBuilder();
+        foreach (var part in parts)
+        {
+            if (string.IsNullOrEmpty(part))
+            {
+                continue;
+            }
+
+            var next = line.Length == 0 ? part : line + "\\" + part;
+            if (next.Length > preferredLineLength && line.Length > 0)
+            {
+                builder.AppendLine(line.ToString());
+                line.Clear();
+                line.Append(part);
+            }
+            else
+            {
+                if (line.Length > 0)
+                {
+                    line.Append('\\');
+                }
+                line.Append(part);
+            }
+        }
+
+        if (line.Length > 0)
+        {
+            builder.Append(line);
+        }
+        return builder.ToString();
+    }
+
+    private static string Indent(string text, string prefix)
+    {
+        return string.Join(
+            Environment.NewLine,
+            text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+                .Select(line => prefix + line));
     }
 
     private void OpenSelectedFolder()
