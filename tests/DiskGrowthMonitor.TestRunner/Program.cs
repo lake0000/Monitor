@@ -17,6 +17,7 @@ internal static class Program
             ("安全路径校验", SafetyPathValidation),
             ("增长计算与目录聚合", GrowthCalculationAndGrouping),
             ("SQLite 持久化", SqlitePersistence),
+            ("SQLite 并发访问", SqliteConcurrentAccess),
             ("目录累计阈值", DirectoryCumulativeThreshold),
             ("减少变化聚合", NegativeDeltaAggregate),
             ("溯源树", TraceTree),
@@ -108,6 +109,42 @@ internal static class Program
         AssertEqual("2000", store.GetSetting("displayThresholdBytes"), "设置应持久化");
         AssertTrue(store.IsIgnored(path), "忽略目录下文件应被识别为忽略");
         AssertEqual(1, store.QueryRecentEvents().Count, "应保存一条增长事件");
+    }
+
+    private static void SqliteConcurrentAccess()
+    {
+        var store = CreateStore("sqlite-concurrent");
+        var root = CreateDirectory("sqlite-concurrent", "watch");
+        var errors = new List<Exception>();
+        var tasks = Enumerable.Range(0, 6).Select(worker => Task.Run(() =>
+        {
+            try
+            {
+                for (var i = 0; i < 35; i++)
+                {
+                    var path = Path.Combine(root, $"worker-{worker}", $"file-{i}.bin");
+                    var group = Path.GetDirectoryName(path)!;
+                    var now = DateTime.Now;
+                    store.UpsertSnapshot(new FileSnapshot(path, i * 1024, now, now, false));
+                    store.InsertGrowthEvents(new[]
+                    {
+                        new GrowthEvent(0, now, path, GrowthEventType.Changed, 0, 2048, 2048, group, "测试", 0.5)
+                    });
+                    _ = store.QueryAggregates(TimeSpan.FromHours(1), 1);
+                    _ = store.GetIgnoreList();
+                }
+            }
+            catch (Exception exception)
+            {
+                lock (errors)
+                {
+                    errors.Add(exception);
+                }
+            }
+        })).ToArray();
+
+        Task.WaitAll(tasks);
+        AssertEqual(0, errors.Count, "SQLite 并发读写不应抛出异常");
     }
 
     private static void DirectoryCumulativeThreshold()

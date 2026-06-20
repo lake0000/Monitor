@@ -27,6 +27,7 @@ public sealed class FileGrowthMonitorService : IDisposable
 
     public event EventHandler<GrowthEvent>? GrowthEventRecorded;
     public event EventHandler<string>? PathSkipped;
+    public event EventHandler<Exception>? MonitorError;
 
     public void Start()
     {
@@ -41,8 +42,8 @@ public sealed class FileGrowthMonitorService : IDisposable
             TryAddWatcher(directory);
         }
 
-        _debounceTimer = new Timer(_ => ProcessDueEvents(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
-        _flushTimer = new Timer(_ => FlushBufferedEvents(), null, _settings.BatchInterval, _settings.BatchInterval);
+        _debounceTimer = new Timer(_ => SafeProcessDueEvents(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _flushTimer = new Timer(_ => SafeFlushBufferedEvents(), null, _settings.BatchInterval, _settings.BatchInterval);
         IsRunning = true;
     }
 
@@ -58,16 +59,23 @@ public sealed class FileGrowthMonitorService : IDisposable
 
     public void RecordObservedPath(string path, GrowthEventType eventType)
     {
-        if (_paused || _store.IsIgnored(path))
+        try
         {
-            return;
-        }
+            if (_paused || _store.IsIgnored(path))
+            {
+                return;
+            }
 
-        var fullPath = Path.GetFullPath(path);
-        _pending.AddOrUpdate(
-            fullPath,
-            _ => new PendingChange(fullPath, eventType, DateTime.Now),
-            (_, existing) => existing with { EventType = eventType, LastObserved = DateTime.Now });
+            var fullPath = Path.GetFullPath(path);
+            _pending.AddOrUpdate(
+                fullPath,
+                _ => new PendingChange(fullPath, eventType, DateTime.Now),
+                (_, existing) => existing with { EventType = eventType, LastObserved = DateTime.Now });
+        }
+        catch (Exception exception)
+        {
+            OnMonitorError(exception);
+        }
     }
 
     public int ProcessDueEvents()
@@ -121,11 +129,18 @@ public sealed class FileGrowthMonitorService : IDisposable
     public int ManualScan()
     {
         var count = 0;
-        foreach (var root in _settings.WatchDirectories.ToArray())
+        try
         {
-            count += ManualScan(root);
+            foreach (var root in _settings.WatchDirectories.ToArray())
+            {
+                count += ManualScan(root);
+            }
+            FlushBufferedEvents();
         }
-        FlushBufferedEvents();
+        catch (Exception exception)
+        {
+            OnMonitorError(exception);
+        }
         return count;
     }
 
@@ -240,6 +255,42 @@ public sealed class FileGrowthMonitorService : IDisposable
         lock (_sync)
         {
             _buffer.Add(growthEvent);
+        }
+    }
+
+    private void SafeProcessDueEvents()
+    {
+        try
+        {
+            ProcessDueEvents();
+        }
+        catch (Exception exception)
+        {
+            OnMonitorError(exception);
+        }
+    }
+
+    private void SafeFlushBufferedEvents()
+    {
+        try
+        {
+            FlushBufferedEvents();
+        }
+        catch (Exception exception)
+        {
+            OnMonitorError(exception);
+        }
+    }
+
+    private void OnMonitorError(Exception exception)
+    {
+        try
+        {
+            MonitorError?.Invoke(this, exception);
+        }
+        catch
+        {
+            // Error reporting must never bring down the monitor service.
         }
     }
 

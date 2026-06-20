@@ -83,6 +83,10 @@ public sealed class MainForm : Form
             _skippedPaths++;
             BeginInvoke((Action)RefreshDashboard);
         };
+        _service.MonitorError += (_, exception) =>
+        {
+            StartupLog.Write(exception);
+        };
 
         RefreshDashboard();
         StartupLog.Write("Main window constructed.");
