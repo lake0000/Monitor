@@ -20,14 +20,16 @@ public sealed class MainForm : Form
     private readonly Label _statusLabel = new();
     private readonly Label _spaceLabel = new();
     private readonly Label _todayLabel = new();
-    private readonly ListView _tenMinuteList = new();
-    private readonly ListView _hourList = new();
-    private readonly ListView _todayList = new();
+    private readonly ListView _tenMinuteList = new SmoothListView();
+    private readonly ListView _hourList = new SmoothListView();
+    private readonly ListView _todayList = new SmoothListView();
     private readonly TextBox _detailBox = new();
     private readonly TextBox _traceBox = new();
     private readonly NumericUpDown _displayThresholdInput = new();
+    private readonly Dictionary<string, string> _listSnapshots = new(StringComparer.Ordinal);
     private GrowthAggregate? _selectedAggregate;
     private bool _loadingThreshold;
+    private bool _isRefreshingDashboard;
 
     public MainForm()
         : this(MonitorSettings.CreateDefault(), null, null, true)
@@ -322,10 +324,23 @@ public sealed class MainForm : Form
 
     private void RefreshDashboard()
     {
-        UpdateMetrics();
-        FillList(_tenMinuteList, _store.QueryAggregates(TimeSpan.FromMinutes(10), _settings.DisplayThresholdBytes));
-        FillList(_hourList, _store.QueryAggregates(TimeSpan.FromHours(1), _settings.DisplayThresholdBytes));
-        FillList(_todayList, _store.QueryAggregates(TimeSpan.FromDays(1), _settings.DisplayThresholdBytes));
+        if (_isRefreshingDashboard)
+        {
+            return;
+        }
+
+        _isRefreshingDashboard = true;
+        try
+        {
+            UpdateMetrics();
+            FillList(_tenMinuteList, _store.QueryAggregates(TimeSpan.FromMinutes(10), _settings.DisplayThresholdBytes));
+            FillList(_hourList, _store.QueryAggregates(TimeSpan.FromHours(1), _settings.DisplayThresholdBytes));
+            FillList(_todayList, _store.QueryAggregates(TimeSpan.FromDays(1), _settings.DisplayThresholdBytes));
+        }
+        finally
+        {
+            _isRefreshingDashboard = false;
+        }
     }
 
     private void UpdateMetrics()
@@ -347,25 +362,65 @@ public sealed class MainForm : Form
 
     private void FillList(ListView list, IReadOnlyList<GrowthAggregate> items)
     {
-        list.BeginUpdate();
-        list.Items.Clear();
-        foreach (var aggregate in items)
+        var snapshot = BuildListSnapshot(items);
+        if (_listSnapshots.TryGetValue(list.Name, out var previousSnapshot) &&
+            string.Equals(previousSnapshot, snapshot, StringComparison.Ordinal))
         {
-            var item = new ListViewItem(new[]
-            {
-                aggregate.GroupPath,
-                FormatSignedBytes(aggregate.DeltaSize),
-                aggregate.DeltaSize >= 0 ? "增加" : "减少",
-                aggregate.SourceGuess,
-                aggregate.LastSeen.ToString("HH:mm:ss")
-            })
-            {
-                Tag = aggregate,
-                ForeColor = aggregate.DeltaSize >= 0 ? Color.FromArgb(183, 84, 42) : Color.FromArgb(15, 126, 112)
-            };
-            list.Items.Add(item);
+            return;
         }
-        list.EndUpdate();
+
+        _listSnapshots[list.Name] = snapshot;
+        var selectedGroupPath = list.SelectedItems.Count > 0
+            ? (list.SelectedItems[0].Tag as GrowthAggregate)?.GroupPath
+            : null;
+
+        list.BeginUpdate();
+        try
+        {
+            list.Items.Clear();
+            foreach (var aggregate in items)
+            {
+                var item = new ListViewItem(new[]
+                {
+                    aggregate.GroupPath,
+                    FormatSignedBytes(aggregate.DeltaSize),
+                    aggregate.DeltaSize >= 0 ? "增加" : "减少",
+                    aggregate.SourceGuess,
+                    aggregate.LastSeen.ToString("HH:mm:ss")
+                })
+                {
+                    Tag = aggregate,
+                    ForeColor = aggregate.DeltaSize >= 0 ? Color.FromArgb(183, 84, 42) : Color.FromArgb(15, 126, 112)
+                };
+
+                list.Items.Add(item);
+                if (!string.IsNullOrWhiteSpace(selectedGroupPath) &&
+                    string.Equals(selectedGroupPath, aggregate.GroupPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Selected = true;
+                    item.Focused = true;
+                }
+            }
+        }
+        finally
+        {
+            list.EndUpdate();
+        }
+    }
+
+    private static string BuildListSnapshot(IReadOnlyList<GrowthAggregate> items)
+    {
+        var builder = new StringBuilder();
+        foreach (var item in items)
+        {
+            builder
+                .Append(item.GroupPath).Append('|')
+                .Append(item.DeltaSize).Append('|')
+                .Append(item.EventCount).Append('|')
+                .Append(item.LastSeen.Ticks).Append('|')
+                .Append(item.SourceGuess).Append('\n');
+        }
+        return builder.ToString();
     }
 
     private void ConfigureList(ListView list, string name)
@@ -745,5 +800,13 @@ public sealed class MainForm : Form
             unit++;
         }
         return $"{value:0.##} {units[unit]}";
+    }
+
+    private sealed class SmoothListView : ListView
+    {
+        public SmoothListView()
+        {
+            DoubleBuffered = true;
+        }
     }
 }

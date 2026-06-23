@@ -25,6 +25,7 @@ internal static class Program
             ("暂停恢复", PauseResume),
             ("监听端到端", WatcherEndToEnd),
             ("UI 烟雾测试", UiSmoke),
+            ("UI 列表缓存刷新", UiListMemoRefresh),
             ("源码危险调用扫描", SourceSafetyScan)
         };
 
@@ -264,6 +265,32 @@ internal static class Program
         {
             AssertFalse(allText.Contains(word, StringComparison.OrdinalIgnoreCase), $"UI 不应出现危险文案：{word}");
         }
+    }
+
+    private static void UiListMemoRefresh()
+    {
+        var settings = CreateSettings("ui-memo");
+        var store = new SqliteMonitorStore(settings.DatabasePath);
+        var group = Path.Combine(settings.WatchDirectories[0], "Cache");
+        store.Initialize();
+        store.InsertGrowthEvents(new[]
+        {
+            new GrowthEvent(0, DateTime.Now, Path.Combine(group, "item.bin"), GrowthEventType.Created, 0, 4096, 4096, group, "缓存", 0.8)
+        });
+
+        using var service = new FileGrowthMonitorService(settings, store);
+        using var form = new MainForm(settings, store, service, false);
+        var refresh = typeof(MainForm).GetMethod("RefreshDashboard", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        AssertNotNull(refresh, "缺少刷新方法");
+        refresh!.Invoke(form, Array.Empty<object>());
+
+        var list = (ListView?)FindControl(form, "TenMinuteList");
+        AssertNotNull(list, "缺少最近 10 分钟列表");
+        AssertTrue(list!.Items.Count > 0, "测试数据应进入列表");
+        var firstItem = list.Items[0];
+
+        refresh.Invoke(form, Array.Empty<object>());
+        AssertTrue(ReferenceEquals(firstItem, list.Items[0]), "数据未变化时不应清空重建列表项");
     }
 
     private static void SourceSafetyScan()
