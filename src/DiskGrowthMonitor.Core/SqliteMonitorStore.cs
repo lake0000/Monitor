@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS ignore_list (
     created_time TEXT NOT NULL,
     note TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS drive_space_sample (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_time TEXT NOT NULL,
+    drive_name TEXT NOT NULL,
+    total_size INTEGER NOT NULL,
+    free_size INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drive_space_sample_drive_time
+ON drive_space_sample(drive_name, sample_time);
 """);
         }
     }
@@ -164,6 +173,71 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
             command.CommandText = "SELECT value FROM settings WHERE key = $key";
             command.Parameters.AddWithValue("$key", key);
             return command.ExecuteScalar() as string;
+        }
+    }
+
+    public void RecordDriveSpaceSample(string driveName, long totalSize, long freeSize, DateTime sampleTime)
+    {
+        lock (_dbLock)
+        {
+            using var connection = OpenConnection();
+            using (var latest = connection.CreateCommand())
+            {
+                latest.CommandText = """
+SELECT sample_time, free_size
+FROM drive_space_sample
+WHERE drive_name = $drive_name
+ORDER BY sample_time DESC
+LIMIT 1
+""";
+                latest.Parameters.AddWithValue("$drive_name", driveName);
+                using var reader = latest.ExecuteReader();
+                if (reader.Read())
+                {
+                    var lastTime = DateTime.Parse(reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                    var lastFree = reader.GetInt64(1);
+                    if (sampleTime - lastTime < TimeSpan.FromMinutes(1) && lastFree == freeSize)
+                    {
+                        return;
+                    }
+                }
+            }
+
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+INSERT INTO drive_space_sample(sample_time, drive_name, total_size, free_size)
+VALUES($sample_time, $drive_name, $total_size, $free_size)
+""";
+            command.Parameters.AddWithValue("$sample_time", sampleTime.ToString("O", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$drive_name", driveName);
+            command.Parameters.AddWithValue("$total_size", totalSize);
+            command.Parameters.AddWithValue("$free_size", freeSize);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    public long? GetDriveFreeSpaceChange(string driveName, DateTime since, long currentFreeSize)
+    {
+        lock (_dbLock)
+        {
+            using var connection = OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+SELECT free_size
+FROM drive_space_sample
+WHERE drive_name = $drive_name AND sample_time >= $since
+ORDER BY sample_time ASC
+LIMIT 1
+""";
+            command.Parameters.AddWithValue("$drive_name", driveName);
+            command.Parameters.AddWithValue("$since", since.ToString("O", CultureInfo.InvariantCulture));
+            var result = command.ExecuteScalar();
+            if (result is null || result == DBNull.Value)
+            {
+                return null;
+            }
+
+            return currentFreeSize - Convert.ToInt64(result, CultureInfo.InvariantCulture);
         }
     }
 

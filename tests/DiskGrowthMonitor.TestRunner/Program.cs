@@ -18,6 +18,7 @@ internal static class Program
             ("增长计算与目录聚合", GrowthCalculationAndGrouping),
             ("SQLite 持久化", SqlitePersistence),
             ("SQLite 并发访问", SqliteConcurrentAccess),
+            ("磁盘空间快照变化", DriveSpaceSnapshotChange),
             ("目录累计阈值", DirectoryCumulativeThreshold),
             ("减少变化聚合", NegativeDeltaAggregate),
             ("溯源树", TraceTree),
@@ -146,6 +147,24 @@ internal static class Program
 
         Task.WaitAll(tasks);
         AssertEqual(0, errors.Count, "SQLite 并发读写不应抛出异常");
+    }
+
+    private static void DriveSpaceSnapshotChange()
+    {
+        var store = CreateStore("drive-space");
+        var today = DateTime.Today.AddHours(1);
+        store.RecordDriveSpaceSample("C", 10000, 4000, today);
+        store.RecordDriveSpaceSample("C", 10000, 2500, today.AddMinutes(5));
+
+        var change = store.GetDriveFreeSpaceChange("C", DateTime.Today, 2500);
+        AssertEqual(-1500L, change, "今日空间变化应使用剩余空间快照差值");
+
+        store.InsertGrowthEvents(new[]
+        {
+            new GrowthEvent(0, DateTime.Now, Path.Combine(TestRoot, "somewhere.bin"), GrowthEventType.Changed, 0, 5000, 5000, TestRoot, "测试", 0.5)
+        });
+        var stillDriveBased = store.GetDriveFreeSpaceChange("C", DateTime.Today, 2500);
+        AssertEqual(-1500L, stillDriveBased, "磁盘空间变化不应被文件事件净和影响");
     }
 
     private static void DirectoryCumulativeThreshold()

@@ -211,7 +211,7 @@ public sealed class MainForm : Form
         _todayLabel.Name = "TodayGrowthLabel";
         _statusLabel.Name = "StatusLabel";
         layout.Controls.Add(CreateMetric("C盘剩余空间", _spaceLabel), 1, 0);
-        layout.Controls.Add(CreateMetric("今日净变化", _todayLabel), 2, 0);
+        layout.Controls.Add(CreateMetric("今日空间变化", _todayLabel), 2, 0);
         layout.Controls.Add(CreateMetric("监听状态", _statusLabel), 3, 0);
         layout.Controls.Add(CreateThresholdControl(), 4, 0);
         return panel;
@@ -348,15 +348,25 @@ public sealed class MainForm : Form
         try
         {
             var drive = new DriveInfo("C");
-            _spaceLabel.Text = FormatBytes(drive.AvailableFreeSpace);
+            var currentFree = drive.AvailableFreeSpace;
+            _spaceLabel.Text = FormatBytes(currentFree);
+            _store.RecordDriveSpaceSample("C", drive.TotalSize, currentFree, DateTime.Now);
+            var freeSpaceChange = _store.GetDriveFreeSpaceChange("C", DateTime.Today, currentFree);
+            _todayLabel.Text = freeSpaceChange is null ? "记录中" : FormatSignedBytes(freeSpaceChange.Value);
+            _todayLabel.ForeColor = freeSpaceChange switch
+            {
+                < 0 => Color.FromArgb(183, 84, 42),
+                > 0 => Color.FromArgb(15, 126, 112),
+                _ => Color.FromArgb(13, 76, 91)
+            };
         }
         catch
         {
             _spaceLabel.Text = "无法读取";
+            _todayLabel.Text = "无法读取";
+            _todayLabel.ForeColor = Color.FromArgb(13, 76, 91);
         }
 
-        var today = _store.QueryAggregates(TimeSpan.FromDays(1), 0).Sum(item => item.DeltaSize);
-        _todayLabel.Text = FormatSignedBytes(today);
         _statusLabel.Text = _service.IsPaused ? "已暂停" : $"观察中 · 跳过 {_skippedPaths}";
     }
 
